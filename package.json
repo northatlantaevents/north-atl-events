@@ -1,0 +1,14 @@
+{
+  "name": "events-feed",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scraper.mjs"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.48.2",
+    "fast-xml-parser": "^4.5.0",
+    "ics": "^3.8.1",
+    "node-fetch": "^3.3.2"
+  }
+}
