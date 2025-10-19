@@ -160,7 +160,7 @@ async function scrapeICS(cfg) {
       let part = [];
       if (cfg.mode === 'dom') part = await scrapeDOM(page, cfg);
       else if (cfg.mode === 'jsonld') part = await scrapeJSONLD(page, cfg);
-      else if (cfg.mode === 'json')) part = await scrapeJSON(cfg);
+      else if (cfg.mode === 'json') part = await scrapeJSON(cfg);
       else if (cfg.mode === 'ics') part = await scrapeICS(cfg);
       else { console.warn(`Unknown mode for ${cfg.key}`); continue; }
 
