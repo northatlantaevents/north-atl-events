@@ -7,7 +7,8 @@ import fetch from 'node-fetch';
 const SITES = JSON.parse(fs.readFileSync('./sites.json','utf8'));
 const OUT_DIR = path.join(process.cwd(), 'docs');
 const OUT_FILE = path.join(OUT_DIR, 'feed.xml');
-const USER_AGENT = 'Mozilla/5.0 (NorthATL-EventsBot; +https://example.com)';
+const DEBUG_DIR = path.join(OUT_DIR, 'debug');
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const safe = (v) => (typeof v === 'string' ? v.trim() : (v ?? '') + '');
@@ -41,22 +42,79 @@ function buildRSS(items, channel = {
   });
 }
 
+async function firstExistingSelector(page, candidates, timeoutMs=6000) {
+  const list = candidates.split(',').map(s => s.trim()).filter(Boolean);
+  const start = Date.now();
+  for (;;) {
+    for (const sel of list) {
+      const count = await page.locator(sel).count();
+      if (count > 0) return sel;
+    }
+    if (Date.now() - start > timeoutMs) return null;
+    await sleep(250);
+  }
+}
+
+async function innerTextSafe(page, handle) {
+  if (!handle) return '';
+  try { return safe(await (await handle.getProperty('innerText')).jsonValue()); }
+  catch { return ''; }
+}
+
 async function scrapeDOM(page, cfg) {
-  await page.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
-  if (cfg.waitMs) await sleep(cfg.waitMs);
-  const cards = await page.locator(cfg.item).elementHandles();
+  const waitMs = cfg.waitMs ?? 2000;
+
+  await page.goto(cfg.url, {
+    waitUntil: 'networkidle',
+    timeout: 60000,
+  });
+  // Helpful headers
+  await page.setExtraHTTPHeaders({
+    'Accept-Language': 'en-US,en;q=0.9'
+  });
+
+  // Some sites lazy-load; give it a beat
+  await sleep(waitMs);
+
+  // Try to find a working item selector from the provided list
+  const itemSel = await firstExistingSelector(page, cfg.item, 8000);
+  if (!itemSel) return { items: [], debug: { itemSelectorChosen: null, itemCount: 0 } };
+
+  const cards = await page.locator(itemSel).elementHandles();
   const take = Math.min(cards.length, cfg.max || 120);
   const out = [];
+
   for (let i = 0; i < take; i++) {
     const el = cards[i];
-    const tEl = await el.$(cfg.title);
-    const aEl = await el.$(cfg.link);
-    const dEl = await el.$(cfg.date);
 
-    const title = tEl ? safe(await (await tEl.getProperty('innerText')).jsonValue()) : '';
-    let href = aEl ? safe(await (await aEl.getAttribute('href'))) : '';
-    if (href.startsWith('/')) href = toAbs(href, cfg.url);
-    const date = dEl ? safe(await (await dEl.innerText()).trim()) : '';
+    // title
+    let title = '';
+    for (const tSel of cfg.title.split(',').map(s => s.trim())) {
+      const tEl = await el.$(tSel);
+      title = await innerTextSafe(page, tEl);
+      if (title) break;
+    }
+
+    // link
+    let href = '';
+    for (const aSel of cfg.link.split(',').map(s => s.trim())) {
+      const aEl = await el.$(aSel);
+      if (aEl) {
+        href = safe(await aEl.getAttribute('href'));
+        if (href) break;
+      }
+    }
+    if (href && href.startsWith('/')) href = toAbs(href, cfg.url);
+
+    // date
+    let date = '';
+    for (const dSel of cfg.date.split(',').map(s => s.trim())) {
+      const dEl = await el.$(dSel);
+      if (dEl) {
+        try { date = safe(await dEl.innerText()); } catch {}
+        if (date) break;
+      }
+    }
 
     if (!title && !href) continue;
     out.push({
@@ -67,12 +125,14 @@ async function scrapeDOM(page, cfg) {
       description: [cfg.venue, date].filter(Boolean).join(' — ')
     });
   }
-  return out;
+
+  return { items: out, debug: { itemSelectorChosen: itemSel, itemCount: take } };
 }
 
 async function scrapeJSONLD(page, cfg) {
   await page.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
-  if (cfg.waitMs) await sleep(cfg.waitMs);
+  await sleep(cfg.waitMs ?? 1000);
+
   const scripts = await page.$$eval('script[type="application/ld+json"]', els => els.map(e => e.textContent || ''));
   const events = [];
   for (const raw of scripts) {
@@ -91,7 +151,8 @@ async function scrapeJSONLD(page, cfg) {
       }
     } catch {}
   }
-  return events.map(e => {
+
+  const out = events.map(e => {
     const title = safe(e.name);
     const url = toAbs(safe(e.url) || cfg.url, cfg.url);
     const start = safe(e.startDate || e.startTime);
@@ -104,6 +165,8 @@ async function scrapeJSONLD(page, cfg) {
       description: [venue, start].filter(Boolean).join(' — ')
     };
   });
+
+  return out;
 }
 
 async function scrapeJSON(cfg) {
@@ -126,53 +189,68 @@ async function scrapeJSON(cfg) {
   });
 }
 
-async function scrapeICS(cfg) {
-  const res = await fetch(cfg.ics, { headers: { 'user-agent': USER_AGENT } });
-  if (!res.ok) throw new Error(`ICS ${res.status} ${cfg.ics}`);
-  const text = await res.text();
-  const events = text.split('BEGIN:VEVENT').slice(1).map(block => {
-    const get = (k) => (block.match(new RegExp(`${k}:(.*)`)) || [,''])[1].trim();
-    const summary = get('SUMMARY');
-    const url = get('URL') || cfg.ics;
-    const dtstart = get('DTSTART') || '';
-    const venue = get('LOCATION') || cfg.venue || '';
-    return { summary, url, dtstart, venue };
-  });
-  return events.map(ev => ({
-    title: (cfg.town ? `[${cfg.town}] ` : '') + safe(ev.summary),
-    link: toAbs(ev.url || cfg.ics, cfg.ics),
-    guid: (ev.url || cfg.ics) + '#' + norm(ev.summary) + '#' + norm(ev.dtstart),
-    pubDate: rfc822(ev.dtstart),
-    description: [ev.venue, ev.dtstart].filter(Boolean).join(' — ')
-  }));
+async function saveDebugSnapshot(page, cfg, reason='empty') {
+  try {
+    if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    const file = path.join(DEBUG_DIR, `${cfg.key}-${reason}.html`);
+    const html = await page.content();
+    fs.writeFileSync(file, html, 'utf8');
+    console.log(`Saved debug HTML → ${file}`);
+  } catch (e) {
+    console.warn(`Could not save debug snapshot for ${cfg.key}: ${e.message}`);
+  }
 }
 
 (async () => {
-  if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR);
+  if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
 
   const browser = await chromium.launch({ args: ['--no-sandbox'] });
-  const ctx = await browser.newContext({ userAgent: USER_AGENT });
+  const ctx = await browser.newContext({ userAgent: USER_AGENT, locale: 'en-US' });
   const page = await ctx.newPage();
 
   const items = [];
   for (const cfg of SITES) {
     try {
       let part = [];
-      if (cfg.mode === 'dom') part = await scrapeDOM(page, cfg);
-      else if (cfg.mode === 'jsonld') part = await scrapeJSONLD(page, cfg);
-      else if (cfg.mode === 'json') part = await scrapeJSON(cfg);
-      else if (cfg.mode === 'ics') part = await scrapeICS(cfg);
-      else { console.warn(`Unknown mode for ${cfg.key}`); continue; }
+      let diag = null;
+
+      if (cfg.mode === 'dom') {
+        const result = await scrapeDOM(page, cfg);
+        part = result.items;
+        diag = result.debug;
+        if ((part?.length || 0) === 0) {
+          // Fallback to JSON-LD if DOM yielded nothing
+          const alt = await scrapeJSONLD(page, { url: cfg.url, venue: cfg.venue, town: cfg.town, waitMs: cfg.waitMs });
+          if (alt.length > 0) {
+            console.log(`Fallback JSON-LD used for ${cfg.key} → ${alt.length} items`);
+            part = alt;
+          } else {
+            await saveDebugSnapshot(page, cfg, 'empty');
+          }
+        }
+      } else if (cfg.mode === 'jsonld') {
+        part = await scrapeJSONLD(page, cfg);
+        if ((part?.length || 0) === 0) await saveDebugSnapshot(page, cfg, 'jsonld-empty');
+      } else if (cfg.mode === 'json') {
+        part = await scrapeJSON(cfg);
+      } else if (cfg.mode === 'ics') {
+        part = await scrapeJSON(cfg);
+      } else {
+        console.warn(`Unknown mode for ${cfg.key}`);
+      }
 
       items.push(...part);
-      console.log(`OK: ${cfg.key} → ${part.length} items`);
+      console.log(`OK: ${cfg.key} → ${part.length} items` + (diag ? ` (selector: ${diag.itemSelectorChosen}, count: ${diag.itemCount})` : ''));
     } catch (e) {
       console.error(`FAIL: ${cfg.key} → ${e.message}`);
+      // Try to capture snapshot on fail
+      try { await saveDebugSnapshot(page, cfg, 'error'); } catch {}
     }
   }
 
   await browser.close();
 
+  // de-dupe
   const seen = new Set();
   const dedup = [];
   for (const it of items) {
