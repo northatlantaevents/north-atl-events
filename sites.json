@@ -1,23 +1,23 @@
 [
   {
+    "key": "canary_eventbrite",
+    "mode": "rss",
+    "rss": "https://www.eventbrite.com/d/ga--atlanta/events--this-weekend/?page=1&view=rss",
+    "venue": "Eventbrite (ATL)",
+    "town": "Atlanta"
+  }
+,
+  {  
     "key": "madlife",
     "mode": "dom",
-    "url": "https://madlifestageandstudios.com/shows",
+    "url": "https://madlifestageandstudios.com/shows/",
     "venue": "MadLife Stage & Studios",
     "town": "Woodstock",
-    "waitMs": 2500
-  },
-{
-  "key": "madlife",
-  "mode": "dom",
-  "url": "https://madlifestageandstudios.com/shows/",
-  "venue": "MadLife Stage & Studios",
-  "town": "Woodstock",
-  "max": 150,
-  "waitMs": 3500,
-  "ua": "mobile",
-  "jsonIdFirst": true
-}
+    "max": 150,
+    "waitMs": 3500,
+    "ua": "mobile",
+    "jsonIdFirst": true
+  }
 
 
 ]
