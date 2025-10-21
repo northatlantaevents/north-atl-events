@@ -6,12 +6,12 @@
   "town": "Alpharetta",
   "venue": "Example Venue (fallback)",
   "map": {
-    "path": "data.events",         // array path inside the response
-    "title": "title",              // or "attributes.title"
-    "link": "url",                 // or "links.detail"
-    "date": "start_date",          // or "start.iso"
-    "venue": "venue.name",         // optional; falls back to cfg.venue if empty
-    "image": "image.url"           // optional; used for images in RSS
+    "path": "data.events",       
+    "title": "title",           
+    "link": "url",              
+    "date": "start_date",       
+    "venue": "venue.name",       
+    "image": "image.url"       
   }
 
   {
