@@ -1,20 +1,5 @@
 [
   {
-  "key": "example_json",
-  "mode": "json",
-  "api": "https://example.com/api/events?upcoming=true",
-  "town": "Alpharetta",
-  "venue": "Example Venue (fallback)",
-  "map": {
-    "path": "data.events",       
-    "title": "title",           
-    "link": "url",              
-    "date": "start_date",       
-    "venue": "venue.name",       
-    "image": "image.url"       
-  }
-
-  {
     "key": "madlife",
     "mode": "dom",
     "url": "https://madlifestageandstudios.com/shows",
@@ -36,7 +21,7 @@
     "title": "h3,.event-title",
     "link": "a",
     "date": ".event-date,time",
-    "image": "img, .event-card img, .event-thumb img, .event-thumb img", 
+    "image": "img, .event-card img, .event-thumb img",
     "venue": "Avalon",
     "town": "Alpharetta",
     "max": 80,
