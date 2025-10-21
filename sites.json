@@ -3,28 +3,16 @@
     "key": "madlife",
     "mode": "dom",
     "url": "https://madlifestageandstudios.com/shows",
-    "item": "article, .event-card, .mec-event-list li, .tribe-events-calendar-list__event",
-    "title": "h2,h3,.entry-title,.event-title,.mec-event-title a",
-    "link": "a,.mec-event-title a",
-    "date": "time,.event-date,.tribe-event-date-start,.mec-start-date",
-    "image": "img, .event-card img, .mec-event-image img, .event-thumb img",
     "venue": "MadLife Stage & Studios",
     "town": "Woodstock",
-    "max": 120,
     "waitMs": 2500
   },
   {
     "key": "avalon",
     "mode": "dom",
     "url": "https://experienceavalon.com/events/",
-    "item": ".event-card, .event-item, article",
-    "title": ".event-title, h3, .card-title, .entry-title",
-    "link": "a",
-    "date": ".event-date, time, .card-date",
-    "image": "img.lazy, img[data-src], .event-thumb img",
     "venue": "Avalon",
     "town": "Alpharetta",
-    "max": 100,
     "waitMs": 2500
 }
 
