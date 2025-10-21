@@ -1,7 +1,4 @@
 // scraper.js
-// Universal JS-capable event feed builder for GitHub Actions + Pages
-// Modes: "dom", "jsonld", "json", "ics", "rss"
-
 import { chromium } from '@playwright/test';
 import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import fs from 'fs';
@@ -13,15 +10,16 @@ const OUT_DIR   = path.join(process.cwd(), 'docs');
 const OUT_FILE  = path.join(OUT_DIR, 'feed.xml');
 const DEBUG_DIR = path.join(OUT_DIR, 'debug');
 
-const USER_AGENT =
+const UA_DESKTOP =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
+const UA_MOBILE =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15A372 Safari/604.1';
 
-// Universal defaults (applied automatically for DOM mode if a site omits selectors)
 const DEFAULT_SELECTORS = {
-  item:  "article, .event, .event-card, .event-item, li.event, li.EventList-item, .tribe-events-calendar-list__event, .mec-event-list li, .mec-event-article, .card, .listing, .tile",
-  title: "h1, h2, h3, .title, .event-title, .entry-title, .card-title, [itemprop='name']",
-  link:  "a[href]",
-  date:  "time, [datetime], .date, .event-date, .card-date, .tribe-event-date-start, .mec-start-date, [class*='date'], [class*='time']",
+  item:  "li.mec-event-article, .mec-event-list li, .tribe-events-calendar-list__event, article, .event, .event-card, .event-item, li.event, li.EventList-item, .card, .listing, .tile",
+  title: ".mec-event-title a, .entry-title a, .entry-title, h1, h2, h3, .title, .event-title, .card-title, [itemprop='name']",
+  link:  ".mec-event-title a, a[href]",
+  date:  ".mec-start-date, .tribe-event-date-start, time, [datetime], .date, .event-date, .card-date, [class*='date'], [class*='time']",
   image: "img, [data-src], [data-original], [data-lazy], [data-image], [style*='background-image']"
 };
 
@@ -42,19 +40,17 @@ const pick  = (obj, pathStr) => {
   if (!pathStr) return undefined;
   return pathStr.split('.').reduce((o,k)=> (o && (k in o) ? o[k] : undefined), obj);
 };
-
-// Allow comments in sites.json if you want
 function stripJsonComments(str) {
-  str = str.replace(/\/\*[\s\S]*?\*\//g, '');       // /* block */
-  str = str.replace(/(^|\s)\/\/.*$/gm, '');         // // line
+  str = str.replace(/\/\*[\s\S]*?\*\//g, '');
+  str = str.replace(/(^|\s)\/\/.*$/gm, '');
   return str;
 }
 
-// Load sites.json (with optional comments)
+// Load sites
 const rawSites = fs.readFileSync('./sites.json', 'utf8');
 const SITES = JSON.parse(stripJsonComments(rawSites));
 
-// Apply universal defaults and simple include/exclude filters
+// Defaults, filters
 function applyDefaults(cfg) {
   if (cfg.mode === 'dom') {
     cfg.item  = cfg.item  || DEFAULT_SELECTORS.item;
@@ -63,10 +59,9 @@ function applyDefaults(cfg) {
     cfg.date  = cfg.date  || DEFAULT_SELECTORS.date;
     cfg.image = cfg.image || DEFAULT_SELECTORS.image;
   }
-  if (cfg.waitMs == null) cfg.waitMs = 2000;
+  if (cfg.waitMs == null) cfg.waitMs = 2200;
 
   if (cfg.filters) {
-    // { include: ["music","live"], exclude: ["bingo","trivia"] }
     cfg._filter = (txt) => {
       const t = (txt || '').toLowerCase();
       if (cfg.filters.exclude && cfg.filters.exclude.some(w => t.includes(w.toLowerCase()))) return false;
@@ -78,7 +73,6 @@ function applyDefaults(cfg) {
   }
 }
 
-// Choose the first selector that exists on the page (for item list)
 async function firstExistingSelector(page, candidates, timeoutMs = 8000) {
   if (!candidates) return null;
   const list = candidates.split(',').map(s => s.trim()).filter(Boolean);
@@ -108,27 +102,36 @@ async function autoScroll(page, pixels = 2000) {
       const timer = setInterval(() => {
         window.scrollBy(0, step);
         scrolled += step;
-        if (scrolled >= document.body.scrollHeight * 0.9) {
-          clearInterval(timer);
-          resolve();
-        }
+        if (scrolled >= document.body.scrollHeight * 0.9) { clearInterval(timer); resolve(); }
       }, 100);
     });
   }, Math.max(200, Math.floor(pixels / 10)));
 }
 
-// Fallback to detail page <meta property="og:image"> or JSON-LD image
+async function clickCookieBanners(page) {
+  const sels = [
+    'button[aria-label="Accept"]',
+    'button:has-text("I Accept")',
+    'button:has-text("Accept All")',
+    'button:has-text("Allow all")',
+    '#onetrust-accept-btn-handler',
+    '.cky-btn-accept, .cmplz-accept'
+  ].join(',');
+  try {
+    const b = await page.$(sels);
+    if (b) { await b.click({ delay: 30 }); await sleep(400); }
+  } catch {}
+}
+
+// Fallback: fetch detail image via og:image or JSON-LD
 async function fetchDetailImage(detailUrl) {
   try {
-    const res = await fetch(detailUrl, { headers: { 'user-agent': USER_AGENT, 'accept': 'text/html' } });
+    const res = await fetch(detailUrl, { headers: { 'user-agent': UA_DESKTOP, 'accept': 'text/html' } });
     if (!res.ok) return '';
     const html = await res.text();
-
-    // og:image
     const og = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
     if (og && og[1]) return toAbs(og[1], detailUrl);
 
-    // JSON-LD
     const ldBlocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)]
       .map(m => (m[1] || '').trim());
     for (const raw of ldBlocks) {
@@ -152,16 +155,15 @@ async function fetchDetailImage(detailUrl) {
   return '';
 }
 
-// Save snapshot when empty for tuning selectors / blocks
-async function saveDebugSnapshot(page, cfg, reason = 'empty') {
+async function saveDebug(page, cfg, reason) {
   try {
     if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
-    const file = path.join(DEBUG_DIR, `${cfg.key}-${reason}.html`);
     const html = await page.content();
-    fs.writeFileSync(file, html, 'utf8');
-    console.log(`Saved debug HTML → ${file}`);
+    fs.writeFileSync(path.join(DEBUG_DIR, `${cfg.key}-${reason}.html`), html, 'utf8');
+    await page.screenshot({ path: path.join(DEBUG_DIR, `${cfg.key}-${reason}.png`), fullPage: true });
+    console.log(`Saved debug → ${path.join('docs/debug', `${cfg.key}-${reason}.html/png`)}`);
   } catch (e) {
-    console.warn(`Could not save debug snapshot for ${cfg.key}: ${e.message}`);
+    console.warn(`Could not save debug for ${cfg.key}: ${e.message}`);
   }
 }
 
@@ -191,7 +193,6 @@ function buildRSS(items, channel = {
             pubDate: i.pubDate,
             description: { '#text': cdata(descHtml) }
           };
-          // Inoreader-friendly categories for filtering
           const cats = [];
           if (i.town)  cats.push({ '#text': i.town });
           if (i.venue) cats.push({ '#text': i.venue });
@@ -214,138 +215,10 @@ function buildRSS(items, channel = {
   return builder.build(rssObj);
 }
 
-// ----------------------------- Mode: DOM -----------------------------
-async function scrapeDOM(page, cfg) {
-  await page.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
-
-  // anti-automation fingerprint softening
-  await page.context().addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  });
-
-  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-  await sleep(cfg.waitMs);
-  await autoScroll(page);
-
-  // click common "load more / next" buttons (MEC/Tribe/etc.)
-  try {
-    const loadMoreSel = [
-      '.mec-load-more a',
-      '.mec-load-more-button',
-      '.tribe-events-c-nav__next, .tribe-events-c-nav__next a',
-      '.load-more a',
-      'button.load-more'
-    ].join(',');
-    const btn = await page.$(loadMoreSel);
-    if (btn) {
-      await btn.click({ delay: 50 });
-      await page.waitForLoadState('networkidle', { timeout: 10000 });
-      await autoScroll(page);
-      await sleep(1200);
-    }
-  } catch {}
-
-  // Cloudflare / challenge page detection
-  const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 2000));
-  if (/Checking your browser|cf-error|enable cookies/i.test(bodyText)) {
-    await saveDebugSnapshot(page, cfg, 'cf-block');
-    return { items: [], debug: { itemSelectorChosen: null, itemCount: 0 } };
-  }
-
-  const itemSel = await firstExistingSelector(page, cfg.item, 8000);
-  if (!itemSel) return { items: [], debug: { itemSelectorChosen: null, itemCount: 0 } };
-
-  const cards = await page.locator(itemSel).elementHandles();
-  const take = Math.min(cards.length, cfg.max || 200);
-  const out = [];
-
-  for (let i = 0; i < take; i++) {
-    const el = cards[i];
-
-    // title
-    let title = '';
-    for (const tSel of cfg.title.split(',').map(s => s.trim())) {
-      const tEl = await el.$(tSel);
-      title = await innerTextSafe(tEl);
-      if (title) break;
-    }
-
-    // link
-    let href = '';
-    for (const aSel of cfg.link.split(',').map(s => s.trim())) {
-      const aEl = await el.$(aSel);
-      if (aEl) {
-        href = safe(await aEl.getAttribute('href'));
-        if (href) break;
-      }
-    }
-    if (href && href.startsWith('/')) href = toAbs(href, cfg.url);
-
-    // date
-    let date = '';
-    for (const dSel of cfg.date.split(',').map(s => s.trim())) {
-      const dEl = await el.$(dSel);
-      if (dEl) {
-        try { date = safe(await dEl.innerText()); } catch {}
-        if (date) break;
-      }
-    }
-
-    // image
-    let imageUrl = '';
-    for (const iSel of cfg.image.split(',').map(s => s.trim())) {
-      const iEl = await el.$(iSel);
-      if (!iEl) continue;
-
-      const cand = await Promise.all([
-        iEl.getAttribute('src'),
-        iEl.getAttribute('data-src'),
-        iEl.getAttribute('data-original'),
-        iEl.getAttribute('data-lazy'),
-        iEl.getAttribute('data-image'),
-        iEl.getAttribute('srcset'),
-        iEl.getAttribute('style')
-      ]);
-      let [src, dataSrc, dataOrig, dataLazy, dataImage, srcset, styleAttr] = cand.map(x => safe(x));
-      if (!src && srcset) src = pickFirstFromSrcset(srcset);
-      if (!src && styleAttr) {
-        const m = styleAttr.match(/background-image:\s*url\((['"]?)([^'")]+)\1\)/i);
-        if (m && m[2]) src = m[2];
-      }
-      imageUrl = toAbs(src || dataSrc || dataOrig || dataLazy || dataImage || '', cfg.url);
-      if (imageUrl) break;
-    }
-
-    if (!title && !href) continue;
-
-    const textBlob = `${title} ${date} ${cfg.venue || ''}`;
-    if (!cfg._filter(textBlob)) continue;
-
-    // Fallback to detail page image if card image missing
-    if (!imageUrl && href) {
-      imageUrl = await fetchDetailImage(href);
-    }
-
-    out.push({
-      title: (cfg.town ? `[${cfg.town}] ` : '') + title,
-      link: href || cfg.url,
-      guid: (href || cfg.url) + '#' + norm(title) + '#' + norm(date),
-      pubDate: rfc822(date),
-      description: [cfg.venue, date].filter(Boolean).join(' — '),
-      image: imageUrl || '',
-      town: cfg.town || '',
-      venue: cfg.venue || ''
-    });
-  }
-
-  return { items: out, debug: { itemSelectorChosen: itemSel, itemCount: take } };
-}
-
-// ----------------------------- Mode: JSON-LD -----------------------------
+// ----------------------------- Modes -----------------------------
 async function scrapeJSONLD(page, cfg) {
   await page.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
   await sleep(cfg.waitMs);
-
   const scripts = await page.$$eval('script[type="application/ld+json"]', els => els.map(e => e.textContent || ''));
   const events = [];
   for (const raw of scripts) {
@@ -364,7 +237,6 @@ async function scrapeJSONLD(page, cfg) {
       }
     } catch {}
   }
-
   const out = [];
   for (const e of events) {
     const title = safe(e.name);
@@ -396,9 +268,146 @@ async function scrapeJSONLD(page, cfg) {
   return out;
 }
 
-// ----------------------------- Mode: JSON (public API) -----------------------------
+async function scrapeDOM(page, cfg) {
+  await page.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
+
+  // UA override per site
+  if (cfg.ua === 'mobile') await page.context().setExtraHTTPHeaders({ 'User-Agent': UA_MOBILE });
+  else await page.context().setExtraHTTPHeaders({ 'User-Agent': UA_DESKTOP });
+
+  await page.context().addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
+
+  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  await clickCookieBanners(page);
+  await sleep(cfg.waitMs);
+  await autoScroll(page);
+
+  // Try load-more buttons (MEC/Tribe/common)
+  try {
+    const loadMoreSel = [
+      '.mec-load-more a',
+      '.mec-load-more-button',
+      '.tribe-events-c-nav__next, .tribe-events-c-nav__next a',
+      '.load-more a', 'button.load-more'
+    ].join(',');
+    const btn = await page.$(loadMoreSel);
+    if (btn) {
+      await btn.click({ delay: 50 });
+      await page.waitForLoadState('networkidle', { timeout: 10000 });
+      await autoScroll(page);
+      await sleep(1200);
+    }
+  } catch {}
+
+  const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 2000));
+  if (/Checking your browser|cf-error|enable cookies/i.test(bodyText)) {
+    await saveDebug(page, cfg, 'cf-block');
+    return [];
+  }
+
+  // If jsonldFirst is set, try JSON-LD before DOM
+  if (cfg.jsonldFirst) {
+    const jsonldItems = await scrapeJSONLD(page, cfg);
+    if (jsonldItems.length > 0) return jsonldItems;
+  }
+
+  // DOM scrape
+  const itemSel = await firstExistingSelector(page, cfg.item, 8000);
+  if (!itemSel) { await saveDebug(page, cfg, 'no-selector'); return []; }
+
+  const cards = await page.locator(itemSel).elementHandles();
+  const take = Math.min(cards.length, cfg.max || 220);
+  const out = [];
+
+  for (let i = 0; i < take; i++) {
+    const el = cards[i];
+
+    // title
+    let title = '';
+    for (const tSel of cfg.title.split(',').map(s => s.trim())) {
+      const tEl = await el.$(tSel);
+      title = await innerTextSafe(tEl);
+      if (title) break;
+    }
+
+    // link
+    let href = '';
+    for (const aSel of cfg.link.split(',').map(s => s.trim())) {
+      const aEl = await el.$(aSel);
+      if (aEl) {
+        href = safe(await aEl.getAttribute('href'));
+        if (href) break;
+      }
+    }
+    if (href && href.startsWith('/')) href = toAbs(href, cfg.url);
+
+    // date
+    let date = '';
+    for (const dSel of cfg.date.split(',').map(s => s.trim())) {
+      const dEl = await el.$(dSel);
+      if (dEl) { try { date = safe(await dEl.innerText()); } catch {} if (date) break; }
+    }
+
+    // image
+    let imageUrl = '';
+    for (const iSel of cfg.image.split(',').map(s => s.trim())) {
+      const iEl = await el.$(iSel);
+      if (!iEl) continue;
+      const cand = await Promise.all([
+        iEl.getAttribute('src'),
+        iEl.getAttribute('data-src'),
+        iEl.getAttribute('data-original'),
+        iEl.getAttribute('data-lazy'),
+        iEl.getAttribute('data-image'),
+        iEl.getAttribute('srcset'),
+        iEl.getAttribute('style')
+      ]);
+      let [src, dataSrc, dataOrig, dataLazy, dataImage, srcset, styleAttr] = cand.map(x => safe(x));
+      if (!src && srcset) src = pickFirstFromSrcset(srcset);
+      if (!src && styleAttr) {
+        const m = styleAttr.match(/background-image:\s*url\((['"]?)([^'")]+)\1\)/i);
+        if (m && m[2]) src = m[2];
+      }
+      imageUrl = toAbs(src || dataSrc || dataOrig || dataLazy || dataImage || '', cfg.url);
+      if (imageUrl) break;
+    }
+
+    if (!title && !href) continue;
+
+    const textBlob = `${title} ${date} ${cfg.venue || ''}`;
+    if (!cfg._filter(textBlob)) continue;
+
+    if (!imageUrl && href) imageUrl = await fetchDetailImage(href);
+
+    out.push({
+      title: (cfg.town ? `[${cfg.town}] ` : '') + title,
+      link: href || cfg.url,
+      guid: (href || cfg.url) + '#' + norm(title) + '#' + norm(date),
+      pubDate: rfc822(date),
+      description: [cfg.venue, date].filter(Boolean).join(' — '),
+      image: imageUrl || '',
+      town: cfg.town || '',
+      venue: cfg.venue || ''
+    });
+  }
+
+  if (out.length === 0) {
+    // one more try: soft reload + more wait (handles MEC autoload)
+    await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
+    await clickCookieBanners(page);
+    await sleep(cfg.waitMs + 1200);
+    await autoScroll(page);
+    const again = await firstExistingSelector(page, cfg.item, 4000);
+    if (!again) { await saveDebug(page, cfg, 'empty'); return []; }
+  }
+
+  return out;
+}
+
 async function scrapeJSON(cfg) {
-  const res = await fetch(cfg.api, { headers: { 'user-agent': USER_AGENT, 'accept': 'application/json' } });
+  const res = await fetch(cfg.api, { headers: { 'user-agent': UA_DESKTOP, 'accept': 'application/json' } });
   if (!res.ok) throw new Error(`JSON ${res.status} ${cfg.api}`);
   const data = await res.json();
 
@@ -414,11 +423,8 @@ async function scrapeJSON(cfg) {
     const venue = safe(cfg.map?.venue ? pick(e, cfg.map.venue) : (e?.venue?.name || e.venue || cfg.venue || ''));
 
     let img = '';
-    if (cfg.map?.image) {
-      img = safe(pick(e, cfg.map.image) || '');
-    } else {
-      img = safe(e.image || e.featured_image || (Array.isArray(e.images) ? e.images[0] : ''));
-    }
+    if (cfg.map?.image) img = safe(pick(e, cfg.map.image) || '');
+    else img = safe(e.image || e.featured_image || (Array.isArray(e.images) ? e.images[0] : ''));
     img = toAbs(img, link);
 
     const textBlob = `${title} ${venue}`;
@@ -438,9 +444,8 @@ async function scrapeJSON(cfg) {
   return out;
 }
 
-// ----------------------------- Mode: ICS (calendars) -----------------------------
 async function scrapeICS(cfg) {
-  const res = await fetch(cfg.ics, { headers: { 'user-agent': USER_AGENT } });
+  const res = await fetch(cfg.ics, { headers: { 'user-agent': UA_DESKTOP } });
   if (!res.ok) throw new Error(`ICS ${res.status} ${cfg.ics}`);
   const text = await res.text();
 
@@ -477,19 +482,14 @@ async function scrapeICS(cfg) {
   return out;
 }
 
-// ----------------------------- Mode: RSS/Atom (via RSS-Bridge, native feeds) -----------------------------
 async function scrapeRSS(cfg) {
   const res = await fetch(cfg.rss, {
-    headers: { 'user-agent': USER_AGENT, 'accept': 'application/rss+xml, application/atom+xml, text/xml;q=0.9' }
+    headers: { 'user-agent': UA_DESKTOP, 'accept': 'application/rss+xml, application/atom+xml, text/xml;q=0.9' }
   });
   if (!res.ok) throw new Error(`RSS ${res.status} ${cfg.rss}`);
   const xml = await res.text();
 
-  const parser = new XMLParser({
-    ignoreAttributes: false,
-    attributeNamePrefix: "@_",
-    allowBooleanAttributes: true
-  });
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", allowBooleanAttributes: true });
   const parsed  = parser.parse(xml);
   const channel = parsed.rss?.channel || parsed.feed || {};
   const entries = channel.item || channel.entry || [];
@@ -543,11 +543,12 @@ async function scrapeRSS(cfg) {
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
   const browser = await chromium.launch({
-    args: ['--no-sandbox','--disable-blink-features=AutomationControlled']
+    args: ['--no-sandbox', '--disable-blink-features=AutomationControlled']
   });
   const ctx = await browser.newContext({
-    userAgent: USER_AGENT,
-    locale: 'en-US'
+    userAgent: UA_DESKTOP,
+    locale: 'en-US',
+    viewport: { width: 1366, height: 900 }
   });
   await ctx.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -564,20 +565,9 @@ async function scrapeRSS(cfg) {
       let part = [];
 
       if (cfg.mode === 'dom') {
-        const result = await scrapeDOM(page, cfg);
-        part = result.items;
-        if ((part?.length || 0) === 0) {
-          const alt = await scrapeJSONLD(page, { url: cfg.url, venue: cfg.venue, town: cfg.town, waitMs: cfg.waitMs, filters: cfg.filters });
-          if (alt.length > 0) {
-            console.log(`Fallback JSON-LD used for ${cfg.key} → ${alt.length} items`);
-            part = alt.filter(it => cfg._filter(`${it.title} ${it.description}`));
-          } else {
-            await saveDebugSnapshot(page, cfg, 'empty');
-          }
-        }
+        part = await scrapeDOM(page, cfg);
       } else if (cfg.mode === 'jsonld') {
         part = await scrapeJSONLD(page, cfg);
-        if ((part?.length || 0) === 0) await saveDebugSnapshot(page, cfg, 'jsonld-empty');
       } else if (cfg.mode === 'json') {
         part = await scrapeJSON(cfg);
       } else if (cfg.mode === 'ics') {
@@ -589,17 +579,18 @@ async function scrapeRSS(cfg) {
         continue;
       }
 
+      if (part.length === 0) await saveDebug(page, cfg, 'empty');
       items.push(...part);
       console.log(`OK: ${cfg.key} → ${part.length} items`);
     } catch (e) {
       console.error(`FAIL: ${cfg.key} → ${e.message}`);
-      try { await saveDebugSnapshot(page, rawCfg, 'error'); } catch {}
+      try { await saveDebug(page, cfg, 'error'); } catch {}
     }
   }
 
   await browser.close();
 
-  // De-dup (title|desc|link)
+  // De-dup
   const seen  = new Set();
   const dedup = [];
   for (const it of items) {
