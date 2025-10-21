@@ -1,11 +1,10 @@
-// scraper.js
+// scraper.js — diagnostic build
 import { chromium } from '@playwright/test';
 import { XMLBuilder, XMLParser } from 'fast-xml-parser';
 import fs from 'fs';
 import path from 'path';
 import fetch from 'node-fetch';
 
-// ----------------------------- Config & constants -----------------------------
 const OUT_DIR   = path.join(process.cwd(), 'docs');
 const OUT_FILE  = path.join(OUT_DIR, 'feed.xml');
 const DEBUG_DIR = path.join(OUT_DIR, 'debug');
@@ -23,7 +22,7 @@ const DEFAULT_SELECTORS = {
   image: "img, [data-src], [data-original], [data-lazy], [data-image], [style*='background-image']"
 };
 
-// ----------------------------- Helpers -----------------------------
+// ---------- helpers ----------
 const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
 const safe   = (v) => (typeof v === 'string' ? v.trim() : (v ?? '') + '');
 const norm   = (s) => safe(s).toLowerCase().replace(/\s+/g, ' ').trim();
@@ -40,17 +39,17 @@ const pick  = (obj, pathStr) => {
   if (!pathStr) return undefined;
   return pathStr.split('.').reduce((o,k)=> (o && (k in o) ? o[k] : undefined), obj);
 };
+
 function stripJsonComments(str) {
   str = str.replace(/\/\*[\s\S]*?\*\//g, '');
   str = str.replace(/(^|\s)\/\/.*$/gm, '');
   return str;
 }
 
-// Load sites
+// ---------- load sites ----------
 const rawSites = fs.readFileSync('./sites.json', 'utf8');
 const SITES = JSON.parse(stripJsonComments(rawSites));
 
-// Defaults, filters
 function applyDefaults(cfg) {
   if (cfg.mode === 'dom') {
     cfg.item  = cfg.item  || DEFAULT_SELECTORS.item;
@@ -59,7 +58,7 @@ function applyDefaults(cfg) {
     cfg.date  = cfg.date  || DEFAULT_SELECTORS.date;
     cfg.image = cfg.image || DEFAULT_SELECTORS.image;
   }
-  if (cfg.waitMs == null) cfg.waitMs = 2200;
+  if (cfg.waitMs == null) cfg.waitMs = 2500;
 
   if (cfg.filters) {
     cfg._filter = (txt) => {
@@ -95,14 +94,14 @@ async function innerTextSafe(handle) {
   catch { return ''; }
 }
 
-async function autoScroll(page, pixels = 2000) {
+async function autoScroll(page, pixels = 2400) {
   await page.evaluate(async (step) => {
     await new Promise((resolve) => {
       let scrolled = 0;
       const timer = setInterval(() => {
         window.scrollBy(0, step);
         scrolled += step;
-        if (scrolled >= document.body.scrollHeight * 0.9) { clearInterval(timer); resolve(); }
+        if (scrolled >= document.body.scrollHeight * 0.95) { clearInterval(timer); resolve(); }
       }, 100);
     });
   }, Math.max(200, Math.floor(pixels / 10)));
@@ -110,20 +109,19 @@ async function autoScroll(page, pixels = 2000) {
 
 async function clickCookieBanners(page) {
   const sels = [
+    '#onetrust-accept-btn-handler',
+    '.cky-btn-accept, .cmplz-accept',
     'button[aria-label="Accept"]',
     'button:has-text("I Accept")',
     'button:has-text("Accept All")',
-    'button:has-text("Allow all")',
-    '#onetrust-accept-btn-handler',
-    '.cky-btn-accept, .cmplz-accept'
+    'button:has-text("Allow all")'
   ].join(',');
   try {
     const b = await page.$(sels);
-    if (b) { await b.click({ delay: 30 }); await sleep(400); }
+    if (b) { await b.click({ delay: 30 }); await sleep(500); }
   } catch {}
 }
 
-// Fallback: fetch detail image via og:image or JSON-LD
 async function fetchDetailImage(detailUrl) {
   try {
     const res = await fetch(detailUrl, { headers: { 'user-agent': UA_DESKTOP, 'accept': 'text/html' } });
@@ -161,13 +159,13 @@ async function saveDebug(page, cfg, reason) {
     const html = await page.content();
     fs.writeFileSync(path.join(DEBUG_DIR, `${cfg.key}-${reason}.html`), html, 'utf8');
     await page.screenshot({ path: path.join(DEBUG_DIR, `${cfg.key}-${reason}.png`), fullPage: true });
-    console.log(`Saved debug → ${path.join('docs/debug', `${cfg.key}-${reason}.html/png`)}`);
+    console.log(`Saved debug → docs/debug/${cfg.key}-${reason}.{html,png}`);
   } catch (e) {
     console.warn(`Could not save debug for ${cfg.key}: ${e.message}`);
   }
 }
 
-// ----------------------------- RSS builder -----------------------------
+// ---------- RSS builder ----------
 function buildRSS(items, channel = {
   title: 'North ATL Events (JS-capable Feed)',
   link: 'https://example.com',
@@ -215,7 +213,7 @@ function buildRSS(items, channel = {
   return builder.build(rssObj);
 }
 
-// ----------------------------- Modes -----------------------------
+// ---------- modes ----------
 async function scrapeJSONLD(page, cfg) {
   await page.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
   await sleep(cfg.waitMs);
@@ -269,22 +267,36 @@ async function scrapeJSONLD(page, cfg) {
 }
 
 async function scrapeDOM(page, cfg) {
-  await page.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
+  // UA per site
+  const ua = cfg.ua === 'mobile' ? UA_MOBILE : UA_DESKTOP;
 
-  // UA override per site
-  if (cfg.ua === 'mobile') await page.context().setExtraHTTPHeaders({ 'User-Agent': UA_MOBILE });
-  else await page.context().setExtraHTTPHeaders({ 'User-Agent': UA_DESKTOP });
-
-  await page.context().addInitScript(() => {
+  // fresh context per site helps some CF setups
+  const ctx = await page.context().browser()?.newContext({
+    userAgent: ua,
+    locale: 'en-US',
+    viewport: { width: ua === UA_MOBILE ? 390 : 1366, height: ua === UA_MOBILE ? 844 : 900 }
+  });
+  await ctx.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
+  const p = await ctx.newPage();
 
-  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-  await clickCookieBanners(page);
+  await p.route('**/*', (route) => {
+    const url = route.request().url();
+    // speed: block heavy analytics/ads/fonts
+    if (/\b(googletagmanager|google-analytics|doubleclick|facebook|hotjar|fullstory|fonts\.gstatic)\b/i.test(url)) {
+      return route.abort();
+    }
+    route.continue();
+  });
+
+  await p.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
+  await p.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+  await clickCookieBanners(p);
   await sleep(cfg.waitMs);
-  await autoScroll(page);
+  await autoScroll(p);
 
-  // Try load-more buttons (MEC/Tribe/common)
+  // “Load more”
   try {
     const loadMoreSel = [
       '.mec-load-more a',
@@ -292,39 +304,54 @@ async function scrapeDOM(page, cfg) {
       '.tribe-events-c-nav__next, .tribe-events-c-nav__next a',
       '.load-more a', 'button.load-more'
     ].join(',');
-    const btn = await page.$(loadMoreSel);
+    const btn = await p.$(loadMoreSel);
     if (btn) {
+      console.log(`[${cfg.key}] Clicking load more…`);
       await btn.click({ delay: 50 });
-      await page.waitForLoadState('networkidle', { timeout: 10000 });
-      await autoScroll(page);
+      await p.waitForLoadState('networkidle', { timeout: 10000 });
+      await autoScroll(p);
       await sleep(1200);
     }
   } catch {}
 
-  const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 2000));
+  const bodyText = await p.evaluate(() => document.body.innerText.slice(0, 2000));
   if (/Checking your browser|cf-error|enable cookies/i.test(bodyText)) {
-    await saveDebug(page, cfg, 'cf-block');
+    console.warn(`[${cfg.key}] Cloudflare / interstitial detected`);
+    await saveDebug(p, cfg, 'cf-block');
+    await p.close(); await ctx.close();
     return [];
   }
 
-  // If jsonldFirst is set, try JSON-LD before DOM
+  // JSON-LD first if requested
   if (cfg.jsonldFirst) {
-    const jsonldItems = await scrapeJSONLD(page, cfg);
-    if (jsonldItems.length > 0) return jsonldItems;
+    const jsonldItems = await scrapeJSONLD(p, cfg);
+    if (jsonldItems.length > 0) {
+      console.log(`[${cfg.key}] JSON-LD first succeeded → ${jsonldItems.length} items`);
+      await p.close(); await ctx.close();
+      return jsonldItems;
+    } else {
+      console.log(`[${cfg.key}] JSON-LD first yielded 0; falling back to DOM`);
+    }
   }
 
-  // DOM scrape
-  const itemSel = await firstExistingSelector(page, cfg.item, 8000);
-  if (!itemSel) { await saveDebug(page, cfg, 'no-selector'); return []; }
+  const itemSel = await firstExistingSelector(p, cfg.item, 8000);
+  if (!itemSel) {
+    console.warn(`[${cfg.key}] No item selector matched`);
+    await saveDebug(p, cfg, 'no-selector');
+    await p.close(); await ctx.close();
+    return [];
+  }
 
-  const cards = await page.locator(itemSel).elementHandles();
+  const count = await p.locator(itemSel).count();
+  console.log(`[${cfg.key}] Using selector: ${itemSel} → ${count} node(s)`);
+
+  const cards = await p.locator(itemSel).elementHandles();
   const take = Math.min(cards.length, cfg.max || 220);
   const out = [];
 
   for (let i = 0; i < take; i++) {
     const el = cards[i];
 
-    // title
     let title = '';
     for (const tSel of cfg.title.split(',').map(s => s.trim())) {
       const tEl = await el.$(tSel);
@@ -332,7 +359,6 @@ async function scrapeDOM(page, cfg) {
       if (title) break;
     }
 
-    // link
     let href = '';
     for (const aSel of cfg.link.split(',').map(s => s.trim())) {
       const aEl = await el.$(aSel);
@@ -343,14 +369,12 @@ async function scrapeDOM(page, cfg) {
     }
     if (href && href.startsWith('/')) href = toAbs(href, cfg.url);
 
-    // date
     let date = '';
     for (const dSel of cfg.date.split(',').map(s => s.trim())) {
       const dEl = await el.$(dSel);
       if (dEl) { try { date = safe(await dEl.innerText()); } catch {} if (date) break; }
     }
 
-    // image
     let imageUrl = '';
     for (const iSel of cfg.image.split(',').map(s => s.trim())) {
       const iEl = await el.$(iSel);
@@ -375,6 +399,7 @@ async function scrapeDOM(page, cfg) {
     }
 
     if (!title && !href) continue;
+    if (i < 2) console.log(`[${cfg.key}] sample[${i}] title="${title}"`);
 
     const textBlob = `${title} ${date} ${cfg.venue || ''}`;
     if (!cfg._filter(textBlob)) continue;
@@ -394,15 +419,11 @@ async function scrapeDOM(page, cfg) {
   }
 
   if (out.length === 0) {
-    // one more try: soft reload + more wait (handles MEC autoload)
-    await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
-    await clickCookieBanners(page);
-    await sleep(cfg.waitMs + 1200);
-    await autoScroll(page);
-    const again = await firstExistingSelector(page, cfg.item, 4000);
-    if (!again) { await saveDebug(page, cfg, 'empty'); return []; }
+    console.warn(`[${cfg.key}] 0 items after DOM scrape`);
+    await saveDebug(p, cfg, 'empty');
   }
 
+  await p.close(); await ctx.close();
   return out;
 }
 
@@ -537,37 +558,40 @@ async function scrapeRSS(cfg) {
   return out;
 }
 
-// ----------------------------- Main -----------------------------
+// ---------- main ----------
 (async () => {
   if (!fs.existsSync(OUT_DIR))   fs.mkdirSync(OUT_DIR,   { recursive: true });
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
+  console.log(`Loaded ${SITES.length} site(s):`, SITES.map(s => s.key).join(', ') || '(none)');
+
   const browser = await chromium.launch({
     args: ['--no-sandbox', '--disable-blink-features=AutomationControlled']
   });
-  const ctx = await browser.newContext({
+  const baseCtx = await browser.newContext({
     userAgent: UA_DESKTOP,
     locale: 'en-US',
     viewport: { width: 1366, height: 900 }
   });
-  await ctx.addInitScript(() => {
+  await baseCtx.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
-  const page = await ctx.newPage();
+  const basePage = await baseCtx.newPage();
 
   const items = [];
 
   for (const rawCfg of SITES) {
     const cfg = { ...rawCfg };
     applyDefaults(cfg);
+    console.log(`\n=== ${cfg.key} (${cfg.mode}) → ${cfg.url || cfg.api || cfg.ics || cfg.rss} ===`);
 
     try {
       let part = [];
 
       if (cfg.mode === 'dom') {
-        part = await scrapeDOM(page, cfg);
+        part = await scrapeDOM(basePage, cfg);
       } else if (cfg.mode === 'jsonld') {
-        part = await scrapeJSONLD(page, cfg);
+        part = await scrapeJSONLD(basePage, cfg);
       } else if (cfg.mode === 'json') {
         part = await scrapeJSON(cfg);
       } else if (cfg.mode === 'ics') {
@@ -579,15 +603,16 @@ async function scrapeRSS(cfg) {
         continue;
       }
 
-      if (part.length === 0) await saveDebug(page, cfg, 'empty');
+      if (part.length === 0) console.warn(`[${cfg.key}] yielded 0 items`);
+      else console.log(`[${cfg.key}] collected ${part.length} item(s)`);
+
       items.push(...part);
-      console.log(`OK: ${cfg.key} → ${part.length} items`);
     } catch (e) {
       console.error(`FAIL: ${cfg.key} → ${e.message}`);
-      try { await saveDebug(page, cfg, 'error'); } catch {}
     }
   }
 
+  await baseCtx.close();
   await browser.close();
 
   // De-dup
@@ -599,6 +624,8 @@ async function scrapeRSS(cfg) {
     seen.add(k);
     dedup.push(it);
   }
+
+  console.log(`\nTotal items before de-dup: ${items.length}, after: ${dedup.length}`);
 
   const rss = buildRSS(dedup.slice(0, 500));
   fs.writeFileSync(OUT_FILE, rss, 'utf8');
