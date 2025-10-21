@@ -1,4 +1,4 @@
-// scraper.mjs
+// scraper.js
 // Universal JS-capable event feed builder for GitHub Actions + Pages
 // Modes: "dom", "jsonld", "json", "ics", "rss"
 
@@ -16,8 +16,9 @@ const DEBUG_DIR = path.join(OUT_DIR, 'debug');
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
 
+// Universal defaults (applied automatically for DOM mode if a site omits selectors)
 const DEFAULT_SELECTORS = {
-  item:  "article, .event, .event-card, .event-item, li.event, li.EventList-item, .tribe-events-calendar-list__event, .mec-event-list li, .card, .listing, .tile",
+  item:  "article, .event, .event-card, .event-item, li.event, li.EventList-item, .tribe-events-calendar-list__event, .mec-event-list li, .mec-event-article, .card, .listing, .tile",
   title: "h1, h2, h3, .title, .event-title, .entry-title, .card-title, [itemprop='name']",
   link:  "a[href]",
   date:  "time, [datetime], .date, .event-date, .card-date, .tribe-event-date-start, .mec-start-date, [class*='date'], [class*='time']",
@@ -100,6 +101,22 @@ async function innerTextSafe(handle) {
   catch { return ''; }
 }
 
+async function autoScroll(page, pixels = 2000) {
+  await page.evaluate(async (step) => {
+    await new Promise((resolve) => {
+      let scrolled = 0;
+      const timer = setInterval(() => {
+        window.scrollBy(0, step);
+        scrolled += step;
+        if (scrolled >= document.body.scrollHeight * 0.9) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 100);
+    });
+  }, Math.max(200, Math.floor(pixels / 10)));
+}
+
 // Fallback to detail page <meta property="og:image"> or JSON-LD image
 async function fetchDetailImage(detailUrl) {
   try {
@@ -135,7 +152,7 @@ async function fetchDetailImage(detailUrl) {
   return '';
 }
 
-// Save snapshot when empty for tuning selectors
+// Save snapshot when empty for tuning selectors / blocks
 async function saveDebugSnapshot(page, cfg, reason = 'empty') {
   try {
     if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
@@ -174,6 +191,12 @@ function buildRSS(items, channel = {
             pubDate: i.pubDate,
             description: { '#text': cdata(descHtml) }
           };
+          // Inoreader-friendly categories for filtering
+          const cats = [];
+          if (i.town)  cats.push({ '#text': i.town });
+          if (i.venue) cats.push({ '#text': i.venue });
+          if (cats.length) node.category = cats;
+
           if (i.image) {
             node['media:content'] = { '@_url': i.image, '@_medium': 'image' };
             node.enclosure = {
@@ -194,14 +217,46 @@ function buildRSS(items, channel = {
 // ----------------------------- Mode: DOM -----------------------------
 async function scrapeDOM(page, cfg) {
   await page.goto(cfg.url, { waitUntil: 'networkidle', timeout: 60000 });
+
+  // anti-automation fingerprint softening
+  await page.context().addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
+
   await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
   await sleep(cfg.waitMs);
+  await autoScroll(page);
+
+  // click common "load more / next" buttons (MEC/Tribe/etc.)
+  try {
+    const loadMoreSel = [
+      '.mec-load-more a',
+      '.mec-load-more-button',
+      '.tribe-events-c-nav__next, .tribe-events-c-nav__next a',
+      '.load-more a',
+      'button.load-more'
+    ].join(',');
+    const btn = await page.$(loadMoreSel);
+    if (btn) {
+      await btn.click({ delay: 50 });
+      await page.waitForLoadState('networkidle', { timeout: 10000 });
+      await autoScroll(page);
+      await sleep(1200);
+    }
+  } catch {}
+
+  // Cloudflare / challenge page detection
+  const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 2000));
+  if (/Checking your browser|cf-error|enable cookies/i.test(bodyText)) {
+    await saveDebugSnapshot(page, cfg, 'cf-block');
+    return { items: [], debug: { itemSelectorChosen: null, itemCount: 0 } };
+  }
 
   const itemSel = await firstExistingSelector(page, cfg.item, 8000);
   if (!itemSel) return { items: [], debug: { itemSelectorChosen: null, itemCount: 0 } };
 
   const cards = await page.locator(itemSel).elementHandles();
-  const take = Math.min(cards.length, cfg.max || 120);
+  const take = Math.min(cards.length, cfg.max || 200);
   const out = [];
 
   for (let i = 0; i < take; i++) {
@@ -277,7 +332,9 @@ async function scrapeDOM(page, cfg) {
       guid: (href || cfg.url) + '#' + norm(title) + '#' + norm(date),
       pubDate: rfc822(date),
       description: [cfg.venue, date].filter(Boolean).join(' — '),
-      image: imageUrl || ''
+      image: imageUrl || '',
+      town: cfg.town || '',
+      venue: cfg.venue || ''
     });
   }
 
@@ -331,7 +388,9 @@ async function scrapeJSONLD(page, cfg) {
       guid: url + '#' + norm(title) + '#' + norm(start),
       pubDate: rfc822(start),
       description: [venue, start].filter(Boolean).join(' — '),
-      image: img
+      image: img,
+      town: cfg.town || '',
+      venue: cfg.venue || venue || ''
     });
   }
   return out;
@@ -371,7 +430,9 @@ async function scrapeJSON(cfg) {
       guid: link + '#' + norm(title) + '#' + norm(date),
       pubDate: rfc822(date),
       description: [venue, date].filter(Boolean).join(' — '),
-      image: img
+      image: img,
+      town: cfg.town || '',
+      venue: cfg.venue || venue || ''
     });
   }
   return out;
@@ -408,7 +469,9 @@ async function scrapeICS(cfg) {
       guid: link + '#' + norm(title) + '#' + norm(date),
       pubDate: rfc822(date),
       description: desc,
-      image: '' // ICS rarely provides images
+      image: '',
+      town: cfg.town || '',
+      venue: cfg.venue || ''
     });
   }
   return out;
@@ -466,7 +529,9 @@ async function scrapeRSS(cfg) {
       guid: (link || cfg.rss) + '#' + norm(title),
       pubDate: rfc822(pub),
       description: prettyDesc,
-      image: imageAbs
+      image: imageAbs,
+      town: cfg.town || '',
+      venue: cfg.venue || ''
     });
   }
   return out;
@@ -477,8 +542,16 @@ async function scrapeRSS(cfg) {
   if (!fs.existsSync(OUT_DIR))   fs.mkdirSync(OUT_DIR,   { recursive: true });
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-  const browser = await chromium.launch({ args: ['--no-sandbox'] });
-  const ctx = await browser.newContext({ userAgent: USER_AGENT, locale: 'en-US' });
+  const browser = await chromium.launch({
+    args: ['--no-sandbox','--disable-blink-features=AutomationControlled']
+  });
+  const ctx = await browser.newContext({
+    userAgent: USER_AGENT,
+    locale: 'en-US'
+  });
+  await ctx.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
   const page = await ctx.newPage();
 
   const items = [];
@@ -497,7 +570,6 @@ async function scrapeRSS(cfg) {
           const alt = await scrapeJSONLD(page, { url: cfg.url, venue: cfg.venue, town: cfg.town, waitMs: cfg.waitMs, filters: cfg.filters });
           if (alt.length > 0) {
             console.log(`Fallback JSON-LD used for ${cfg.key} → ${alt.length} items`);
-            // pass through the same filter function
             part = alt.filter(it => cfg._filter(`${it.title} ${it.description}`));
           } else {
             await saveDebugSnapshot(page, cfg, 'empty');
