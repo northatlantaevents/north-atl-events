@@ -11,14 +11,12 @@
   "key": "madlife",
   "mode": "dom",
   "url": "https://madlifestageandstudios.com/shows/",
-  "item": ".mec-event-list li, .mec-event-article, .tribe-events-calendar-list__event, article, .event-card",
-  "title": ".mec-event-title a, .entry-title a, .entry-title, h2, h3",
-  "link": ".mec-event-title a, a",
-  "date": ".mec-start-date, .tribe-event-date-start, time, .event-date",
   "venue": "MadLife Stage & Studios",
   "town": "Woodstock",
   "max": 150,
-  "waitMs": 3500
+  "waitMs": 3500,
+  "ua": "mobile",
+  "jsonIdFirst": true
 }
 
 
