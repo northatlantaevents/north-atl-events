@@ -16,15 +16,16 @@
   {
     "key": "avalon",
     "mode": "dom",
-    "url": "https://www.experienceavalon.com/events",
-    "item": ".event-card, article, .event-item",
-    "title": "h3,.event-title",
+    "url": "https://experienceavalon.com/events/",
+    "item": ".event-card, .event-item, article",
+    "title": ".event-title, h3, .card-title, .entry-title",
     "link": "a",
-    "date": ".event-date,time",
-    "image": "img, .event-card img, .event-thumb img",
+    "date": ".event-date, time, .card-date",
+    "image": "img.lazy, img[data-src], .event-thumb img",
     "venue": "Avalon",
     "town": "Alpharetta",
-    "max": 80,
-    "waitMs": 2000
-  }
+    "max": 100,
+    "waitMs": 2500
+}
+
 ]
